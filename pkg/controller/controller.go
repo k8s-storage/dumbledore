@@ -14,6 +14,13 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
+var (
+	IntializerAnnotation    string
+	IntializerConfigmapName string
+	InitializerName         string
+	IntializerNamespace     string
+)
+
 func NewPVInitializer(clientset *kubernetes.Clientset) (cache.Controller, error) {
 	restClient := clientset.CoreV1().RESTClient()
 	watchlist := cache.NewListWatchFromClient(restClient, "pods", coreV1.NamespaceAll, fields.Everything())
@@ -48,5 +55,21 @@ func NewPVInitializer(clientset *kubernetes.Clientset) (cache.Controller, error)
 }
 
 func addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) error {
+	if pod != nil && pod.ObjectMeta.GetInitializers() != nil {
+		pendingInitializers := pod.ObjectMeta.GetInitializers().Pending
+
+		if InitializerName == pendingInitializers[0].Name {
+			glog.V(3).Infof("Initializing: %s", pod.Name)
+
+			initializedPod := pod.DeepCopy()
+			// Remove self from the list of pending Initializers while preserving ordering.
+			if len(pendingInitializers) == 1 {
+				initializedPod.ObjectMeta.Initializers = nil
+			} else {
+				initializedPod.ObjectMeta.Initializers.Pending = append(pendingInitializers[:0], pendingInitializers[1:]...)
+			}
+		}
+	}
+
 	return nil
 }

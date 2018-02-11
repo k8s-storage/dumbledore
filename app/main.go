@@ -22,18 +22,11 @@ const (
 	defaultConfigMapNamespace    = "default"
 )
 
-var (
-	annotation      string
-	configmap       string
-	initializerName string
-	namespace       string
-)
-
 func main() {
-	flag.StringVar(&annotation, "annotation", defaultInitializerAnnotation, "The annotation to trigger initialization")
-	flag.StringVar(&configmap, "configmap", defaultConfigmapName, "storage initializer configuration configmap")
-	flag.StringVar(&initializerName, "initializer-name", defaultInitializerName, "The initializer name")
-	flag.StringVar(&namespace, "namespace", defaultConfigMapNamespace, "The configuration namespace")
+	flag.StringVar(&controller.IntializerAnnotation, "annotation", defaultInitializerAnnotation, "The annotation to trigger initialization")
+	flag.StringVar(&controller.IntializerConfigmapName, "configmap", defaultConfigmapName, "storage initializer configuration configmap")
+	flag.StringVar(&controller.InitializerName, "initializer-name", defaultInitializerName, "The initializer name")
+	flag.StringVar(&controller.IntializerNamespace, "namespace", defaultConfigMapNamespace, "The configuration namespace")
 	flag.Parse()
 
 	clusterConfig, err := rest.InClusterConfig()
@@ -46,7 +39,7 @@ func main() {
 		glog.Fatal(err)
 	}
 
-	_, err = clientset.CoreV1().ConfigMaps(namespace).Get(configmap, metaV1.GetOptions{})
+	_, err = clientset.CoreV1().ConfigMaps(controller.IntializerNamespace).Get(controller.IntializerConfigmapName, metaV1.GetOptions{})
 	if err != nil {
 		glog.Fatal(err)
 	}
