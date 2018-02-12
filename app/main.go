@@ -24,9 +24,10 @@ const (
 )
 
 var (
-        kubeConfig      string                                                                                                                                                              
-        kubeMaster      string  
+	kubeConfig string
+	kubeMaster string
 )
+
 func main() {
 	flag.StringVar(&controller.IntializerAnnotation, "annotation", defaultInitializerAnnotation, "The annotation to trigger initialization")
 	flag.StringVar(&controller.IntializerConfigmapName, "configmap", defaultConfigmapName, "storage initializer configuration configmap")
@@ -63,7 +64,7 @@ func main() {
 	if err != nil {
 		glog.Fatal(err)
 	}
-
+	glog.Infof("Starting initializer ")
 	stop := make(chan struct{})
 	go ctrl.Run(stop)
 

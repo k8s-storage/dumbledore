@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/golang/glog"
@@ -9,6 +10,8 @@ import (
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -55,6 +58,8 @@ func NewPVInitializer(clientset *kubernetes.Clientset) (cache.Controller, error)
 }
 
 func addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) error {
+	glog.V(3).Infof("Creating Pod: %+v", *pod)
+
 	if pod != nil && pod.ObjectMeta.GetInitializers() != nil {
 		pendingInitializers := pod.ObjectMeta.GetInitializers().Pending
 
@@ -67,6 +72,25 @@ func addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) error {
 				initializedPod.ObjectMeta.Initializers = nil
 			} else {
 				initializedPod.ObjectMeta.Initializers.Pending = append(pendingInitializers[:0], pendingInitializers[1:]...)
+			}
+			oldData, err := json.Marshal(pod)
+			if err != nil {
+				return err
+			}
+
+			newData, err := json.Marshal(initializedPod)
+			if err != nil {
+				return err
+			}
+
+			patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, coreV1.Pod{})
+			if err != nil {
+				return err
+			}
+
+			_, err = clientset.CoreV1().Pods(pod.Namespace).Patch(pod.Name, types.StrategicMergePatchType, patchBytes)
+			if err != nil {
+				return err
 			}
 		}
 	}
