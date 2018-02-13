@@ -60,9 +60,9 @@ func main() {
 		glog.Warning(err)
 	}
 
-	ctrl, err := controller.NewPVInitializer(clientset)
-	if err != nil {
-		glog.Fatal(err)
+	ctrl := controller.NewPVInitializer(clientset)
+	if ctrl == nil {
+		glog.Fatal("failed to create initializer")
 	}
 	glog.Infof("Starting initializer ")
 	stop := make(chan struct{})
