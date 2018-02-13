@@ -29,7 +29,7 @@ var (
 
 type Controller struct {
 	clientset     *kubernetes.Clientset
-	podPVCMap     map[string][]*coreV1.PersistentVolumeClaim
+	podPVCMap     map[string]string
 	podPVCLock    *sync.Mutex
 	podController cache.Controller
 	pvcController cache.Controller
@@ -38,7 +38,7 @@ type Controller struct {
 func NewPVInitializer(clientset *kubernetes.Clientset) *Controller {
 	c := &Controller{
 		clientset:  clientset,
-		podPVCMap:  make(map[string][]*coreV1.PersistentVolumeClaim),
+		podPVCMap:  make(map[string]string),
 		podPVCLock: &sync.Mutex{},
 	}
 
@@ -66,7 +66,7 @@ func NewPVInitializer(clientset *kubernetes.Clientset) *Controller {
 		resyncPeriod,
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
-				err := addPod(obj.(*coreV1.Pod), clientset)
+				err := c.addPod(obj.(*coreV1.Pod), clientset)
 				if err != nil {
 					glog.Warningf("failed to initialized: %v", err)
 					return
@@ -88,7 +88,7 @@ func NewPVInitializer(clientset *kubernetes.Clientset) *Controller {
 		resyncPeriod,
 		cache.ResourceEventHandlerFuncs{
 			UpdateFunc: func(old, new interface{}) {
-				err := updatePVC(old.(*coreV1.PersistentVolumeClaim), new.(*coreV1.PersistentVolumeClaim), clientset)
+				err := c.updatePVC(old.(*coreV1.PersistentVolumeClaim), new.(*coreV1.PersistentVolumeClaim), clientset)
 				if err != nil {
 					glog.Warningf("failed to initialized: %v", err)
 					return
@@ -123,7 +123,7 @@ func (c *Controller) Run(ctx <-chan struct{}) {
 	}
 }
 
-func addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) error {
+func (c *Controller) addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) error {
 	if pod != nil && pod.ObjectMeta.GetInitializers() != nil {
 		pendingInitializers := pod.ObjectMeta.GetInitializers().Pending
 
@@ -156,6 +156,7 @@ func addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) error {
 						} else {
 							// defer till PVC is bound
 							//TODO remember this PVC and update PV later
+							c.updatePodPVCMap(pod.Namespace, pvcName, "TODO", true /* toAdd */)
 						}
 					}
 				}
@@ -187,7 +188,37 @@ func addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) error {
 	return nil
 }
 
-func updatePVC(oldPVC, newPVC *coreV1.PersistentVolumeClaim, clientset *kubernetes.Clientset) error {
-	glog.V(3).Infof("updating pvc %+v", *oldPVC)
+func (c *Controller) updatePVC(oldPVC, newPVC *coreV1.PersistentVolumeClaim, clientset *kubernetes.Clientset) error {
+	glog.V(3).Infof("updating pvc %+v", *newPVC)
+	ns := newPVC.Namespace
+	name := newPVC.Name
+
+	if data := c.getPodPVCMap(ns, name); len(data) > 0 {
+		c.updatePodPVCMap(ns, name, "", false /* toAdd */)
+	}
 	return nil
+}
+
+func (c *Controller) updatePodPVCMap(pvcNS, pvcName, data string, toAdd bool) {
+	c.podPVCLock.Lock()
+	defer c.podPVCLock.Unlock()
+	key := pvcNS + "/" + pvcName
+	glog.V(5).Infof("updating map: %s/%s %v", pvcNS, pvcName, toAdd)
+	if toAdd {
+		c.podPVCMap[key] = data
+	} else {
+		delete(c.podPVCMap, key)
+	}
+}
+
+func (c *Controller) getPodPVCMap(pvcNS, pvcName string) string {
+	c.podPVCLock.Lock()
+	defer c.podPVCLock.Unlock()
+	key := pvcNS + "/" + pvcName
+	glog.V(5).Infof("get map: %s/%s", pvcNS, pvcName)
+	val, ok := c.podPVCMap[key]
+	if ok {
+		return val
+	}
+	return ""
 }
