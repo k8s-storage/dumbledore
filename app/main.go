@@ -19,10 +19,10 @@ import (
 )
 
 const (
-	defaultInitializerAnnotation = "initializer.kubernetes.io/pv"
-	defaultInitializerName       = "pv.initializer.kubernetes.io"
-	defaultConfigmapName         = "pv-initializer"
-	defaultConfigMapNamespace    = "default"
+	defaultPVAnnotation       = "volume.kubernetes.io/pv"
+	defaultInitializerName    = "pv.initializer.kubernetes.io"
+	defaultConfigmapName      = "pv-initializer"
+	defaultConfigMapNamespace = "default"
 )
 
 var (
@@ -31,7 +31,7 @@ var (
 )
 
 func main() {
-	flag.StringVar(&controller.IntializerAnnotation, "annotation", defaultInitializerAnnotation, "The annotation to trigger initialization")
+	flag.StringVar(&controller.PVAnnotation, "pv-annotation", defaultPVAnnotation, "PersistentVolume Annotation to patch")
 	flag.StringVar(&controller.IntializerConfigmapName, "configmap", defaultConfigmapName, "storage initializer configuration configmap")
 	flag.StringVar(&controller.InitializerName, "initializer-name", defaultInitializerName, "The initializer name")
 	flag.StringVar(&controller.IntializerNamespace, "namespace", defaultConfigMapNamespace, "The configuration namespace")
