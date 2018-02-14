@@ -12,8 +12,6 @@ import (
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
@@ -27,16 +25,24 @@ var (
 	IntializerNamespace     string
 )
 
+type Config struct {
+	Name       string            `"yaml: name"`
+	Label      string            `"yaml: label"`
+	Attributes []map[string]bool `"yaml: attributes"`
+}
+
 type Controller struct {
 	clientset     *kubernetes.Clientset
 	podPVCMap     map[string]string
 	podPVCLock    *sync.Mutex
 	podController cache.Controller
 	pvcController cache.Controller
+	config        *[]Config
 }
 
-func NewPVInitializer(clientset *kubernetes.Clientset) *Controller {
+func NewPVInitializer(clientset *kubernetes.Clientset, conf *[]Config) *Controller {
 	c := &Controller{
+		config:     conf,
 		clientset:  clientset,
 		podPVCMap:  make(map[string]string),
 		podPVCLock: &sync.Mutex{},
@@ -138,47 +144,41 @@ func (c *Controller) addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) er
 				initializedPod.ObjectMeta.Initializers.Pending = append(pendingInitializers[:0], pendingInitializers[1:]...)
 
 			}
-			vols := pod.Spec.Volumes
-			for _, vol := range vols {
-				if vol.VolumeSource.PersistentVolumeClaim != nil {
-					pvcName := vol.VolumeSource.PersistentVolumeClaim.ClaimName
-					glog.V(3).Infof("PVC %s", pvcName)
-					pvc, err := clientset.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(pvcName, metaV1.GetOptions{})
-					if err == nil {
-						// if PVC is bound, update PV.
-						pvName := pvc.Spec.VolumeName
-						if len(pvName) > 0 {
-							pv, err := clientset.CoreV1().PersistentVolumes().Get(pvName, metaV1.GetOptions{})
-							if err == nil {
-								glog.V(3).Infof("update PV %s", pv.Name)
-								//TODO update PV here
+			if labels := initializedPod.ObjectMeta.GetLabels(); len(labels) > 0 {
+				glog.V(5).Infof("labels %+v", labels)
+				app, ok := labels["app"]
+				if ok {
+					attr := c.GetAttributes(app)
+					if len(attr) > 0 {
+						vols := pod.Spec.Volumes
+						for _, vol := range vols {
+							if vol.VolumeSource.PersistentVolumeClaim != nil {
+								pvcName := vol.VolumeSource.PersistentVolumeClaim.ClaimName
+								glog.V(3).Infof("PVC %s", pvcName)
+								pvc, err := clientset.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(pvcName, metaV1.GetOptions{})
+								if err == nil {
+									// if PVC is bound, update PV.
+									pvName := pvc.Spec.VolumeName
+									if len(pvName) > 0 {
+										pv, err := clientset.CoreV1().PersistentVolumes().Get(pvName, metaV1.GetOptions{})
+										if err == nil {
+											glog.V(3).Infof("update PV %s", pv.Name)
+											//TODO update PV here
+										}
+									} else {
+										// defer till PVC is bound
+										//TODO remember this PVC and update PV later
+										c.updatePodPVCMap(pod.Namespace, pvcName, attr, true /* toAdd */)
+									}
+								}
 							}
-						} else {
-							// defer till PVC is bound
-							//TODO remember this PVC and update PV later
-							c.updatePodPVCMap(pod.Namespace, pvcName, "TODO", true /* toAdd */)
 						}
 					}
 				}
 			}
-
-			oldData, err := json.Marshal(pod)
+			_, err := clientset.CoreV1().Pods(pod.Namespace).Update(initializedPod)
 			if err != nil {
-				return err
-			}
-
-			newData, err := json.Marshal(initializedPod)
-			if err != nil {
-				return err
-			}
-
-			patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, coreV1.Pod{})
-			if err != nil {
-				return err
-			}
-
-			_, err = clientset.CoreV1().Pods(pod.Namespace).Patch(pod.Name, types.StrategicMergePatchType, patchBytes)
-			if err != nil {
+				glog.Warning("failed to update pod %s/%s: %v", pod.Namespace, pod.Name, err)
 				return err
 			}
 			glog.V(3).Infof("Initialized: %s", pod.Name)
@@ -199,13 +199,13 @@ func (c *Controller) updatePVC(oldPVC, newPVC *coreV1.PersistentVolumeClaim, cli
 	return nil
 }
 
-func (c *Controller) updatePodPVCMap(pvcNS, pvcName, data string, toAdd bool) {
+func (c *Controller) updatePodPVCMap(pvcNS, pvcName, attr string, toAdd bool) {
 	c.podPVCLock.Lock()
 	defer c.podPVCLock.Unlock()
 	key := pvcNS + "/" + pvcName
-	glog.V(5).Infof("updating map: %s/%s %v", pvcNS, pvcName, toAdd)
+	glog.V(5).Infof("updating map: %s/%s with %s %v", pvcNS, pvcName, attr, toAdd)
 	if toAdd {
-		c.podPVCMap[key] = data
+		c.podPVCMap[key] = attr
 	} else {
 		delete(c.podPVCMap, key)
 	}
@@ -219,6 +219,20 @@ func (c *Controller) getPodPVCMap(pvcNS, pvcName string) string {
 	val, ok := c.podPVCMap[key]
 	if ok {
 		return val
+	}
+	return ""
+}
+
+func (c *Controller) GetAttributes(app string) string {
+	for _, conf := range *c.config {
+		if conf.Label == app {
+			str, err := json.Marshal(conf.Attributes)
+			if err != nil {
+				glog.Warningf("failed to marshal %+v", conf.Attributes)
+				return ""
+			}
+			return string(str)
+		}
 	}
 	return ""
 }

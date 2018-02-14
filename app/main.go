@@ -7,9 +7,11 @@ import (
 	"syscall"
 
 	"github.com/golang/glog"
+	"gopkg.in/yaml.v2"
 
 	"github.com/k8s-storage/dumbledore/pkg/controller"
 
+	coreV1 "k8s.io/api/core/v1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -55,12 +57,15 @@ func main() {
 		glog.Fatal(err)
 	}
 
-	_, err = clientset.CoreV1().ConfigMaps(controller.IntializerNamespace).Get(controller.IntializerConfigmapName, metaV1.GetOptions{})
+	cm, err := clientset.CoreV1().ConfigMaps(controller.IntializerNamespace).Get(controller.IntializerConfigmapName, metaV1.GetOptions{})
 	if err != nil {
-		glog.Warning(err)
+		glog.Fatal(err)
 	}
-
-	ctrl := controller.NewPVInitializer(clientset)
+	conf, err := configMapToConfig(cm)
+	if err != nil {
+		glog.Fatalf("failed to parse configmap: %v", err)
+	}
+	ctrl := controller.NewPVInitializer(clientset, conf)
 	if ctrl == nil {
 		glog.Fatal("failed to create initializer")
 	}
@@ -73,4 +78,14 @@ func main() {
 	<-signalChan
 
 	close(stop)
+}
+
+func configMapToConfig(cm *coreV1.ConfigMap) (*[]controller.Config, error) {
+	var c []controller.Config
+	err := yaml.Unmarshal([]byte(cm.Data["config"]), &c)
+	if err != nil {
+		return nil, err
+	}
+	glog.V(5).Infof("configs %+v", c)
+	return &c, err
 }
