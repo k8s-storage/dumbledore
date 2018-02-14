@@ -26,9 +26,9 @@ var (
 )
 
 type Config struct {
-	Name       string              `"yaml: name"`
-	Label      string              `"yaml: label"`
-	Attributes []map[string]string `"yaml: attributes"`
+	Name       string `"yaml: name"`
+	Label      string `"yaml: label"`
+	Attributes string `"yaml: attributes"`
 }
 
 type Controller struct {
@@ -72,7 +72,7 @@ func NewPVInitializer(clientset *kubernetes.Clientset, conf *[]Config) *Controll
 		resyncPeriod,
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
-				err := c.addPod(obj.(*coreV1.Pod), clientset)
+				err := c.addPod(obj.(*coreV1.Pod))
 				if err != nil {
 					glog.Warningf("failed to initialized: %v", err)
 					return
@@ -94,7 +94,7 @@ func NewPVInitializer(clientset *kubernetes.Clientset, conf *[]Config) *Controll
 		resyncPeriod,
 		cache.ResourceEventHandlerFuncs{
 			UpdateFunc: func(old, new interface{}) {
-				err := c.updatePVC(old.(*coreV1.PersistentVolumeClaim), new.(*coreV1.PersistentVolumeClaim), clientset)
+				err := c.updatePVC(old.(*coreV1.PersistentVolumeClaim), new.(*coreV1.PersistentVolumeClaim))
 				if err != nil {
 					glog.Warningf("failed to initialized: %v", err)
 					return
@@ -129,7 +129,7 @@ func (c *Controller) Run(ctx <-chan struct{}) {
 	}
 }
 
-func (c *Controller) addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) error {
+func (c *Controller) addPod(pod *coreV1.Pod) error {
 	if pod != nil && pod.ObjectMeta.GetInitializers() != nil {
 		pendingInitializers := pod.ObjectMeta.GetInitializers().Pending
 
@@ -148,23 +148,19 @@ func (c *Controller) addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) er
 				glog.V(5).Infof("labels %+v", labels)
 				app, ok := labels["app"]
 				if ok {
-					attr := c.GetAttributes(app)
+					attr := c.getAttributes(app)
 					if len(attr) > 0 {
 						vols := pod.Spec.Volumes
 						for _, vol := range vols {
 							if vol.VolumeSource.PersistentVolumeClaim != nil {
 								pvcName := vol.VolumeSource.PersistentVolumeClaim.ClaimName
 								glog.V(3).Infof("PVC %s", pvcName)
-								pvc, err := clientset.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(pvcName, metaV1.GetOptions{})
+								pvc, err := c.clientset.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(pvcName, metaV1.GetOptions{})
 								if err == nil {
 									// if PVC is bound, update PV.
 									pvName := pvc.Spec.VolumeName
 									if len(pvName) > 0 {
-										pv, err := clientset.CoreV1().PersistentVolumes().Get(pvName, metaV1.GetOptions{})
-										if err == nil {
-											glog.V(3).Infof("update PV %s", pv.Name)
-											//TODO update PV here
-										}
+										c.updatePVAnnotation(pvName, attr)
 									} else {
 										// defer till PVC is bound
 										c.updatePodPVCMap(pod.Namespace, pvcName, attr, true /* toAdd */)
@@ -175,7 +171,7 @@ func (c *Controller) addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) er
 					}
 				}
 			}
-			_, err := clientset.CoreV1().Pods(pod.Namespace).Update(initializedPod)
+			_, err := c.clientset.CoreV1().Pods(pod.Namespace).Update(initializedPod)
 			if err != nil {
 				glog.Warning("failed to update pod %s/%s: %v", pod.Namespace, pod.Name, err)
 				return err
@@ -187,7 +183,49 @@ func (c *Controller) addPod(pod *coreV1.Pod, clientset *kubernetes.Clientset) er
 	return nil
 }
 
-func (c *Controller) updatePVC(oldPVC, newPVC *coreV1.PersistentVolumeClaim, clientset *kubernetes.Clientset) error {
+func (c *Controller) updatePVAnnotation(pvName, data string) {
+	pv, err := c.clientset.CoreV1().PersistentVolumes().Get(pvName, metaV1.GetOptions{})
+	if err == nil {
+		glog.V(3).Infof("update PV %s", pv.Name)
+		ann := pv.ObjectMeta.GetAnnotations()
+		if ann == nil {
+			var m map[string]string
+			m[PVAnnotation] = data
+			pv.ObjectMeta.SetAnnotations(m)
+		} else {
+			existingAnn := ann[PVAnnotation]
+			if len(existingAnn) == 0 {
+				// annotation doesn't exist, just add
+				ann[PVAnnotation] = data
+			} else {
+				// append to existing annotation
+				attrs := map[string]interface{}{}
+				existingAttrs := map[string]interface{}{}
+				glog.V(5).Infof("updating %s with %s", existingAnn, data)
+				err1 := json.Unmarshal([]byte(data), &attrs)
+				err2 := json.Unmarshal([]byte(existingAnn), &existingAttrs)
+				if err1 == nil && err2 == nil {
+					for k, v := range attrs {
+						glog.V(5).Infof("add %v %v", k, v)
+						existingAttrs[k] = v
+					}
+					newAnn, err := json.Marshal(existingAttrs)
+					if err == nil {
+						ann[PVAnnotation] = string(newAnn)
+					}
+				}
+			}
+			glog.V(3).Infof("updating with new annotation %+v", ann)
+			pv.ObjectMeta.SetAnnotations(ann)
+		}
+		_, err := c.clientset.CoreV1().PersistentVolumes().Update(pv)
+		if err != nil {
+			glog.Warningf("failed to update pv :%v", err)
+		}
+	}
+}
+
+func (c *Controller) updatePVC(oldPVC, newPVC *coreV1.PersistentVolumeClaim) error {
 	ns := newPVC.Namespace
 	name := newPVC.Name
 
@@ -196,43 +234,7 @@ func (c *Controller) updatePVC(oldPVC, newPVC *coreV1.PersistentVolumeClaim, cli
 		if newPVC.Status.Phase == coreV1.ClaimBound {
 			pvName := newPVC.Spec.VolumeName
 			if len(pvName) > 0 {
-				pv, err := c.clientset.CoreV1().PersistentVolumes().Get(pvName, metaV1.GetOptions{})
-				if err == nil {
-					glog.V(3).Infof("update PV %s", pv.Name)
-					ann := pv.ObjectMeta.GetAnnotations()
-					if ann == nil {
-						var m map[string]string
-						m[PVAnnotation] = data
-						pv.ObjectMeta.SetAnnotations(m)
-					} else {
-						existingAnn, ok := ann[PVAnnotation]
-						if !ok {
-							// annotation doesn't exist, just add
-							ann[PVAnnotation] = data
-						} else {
-							// append to existing annotation
-							var attrs, existingAttrs map[string]interface{}
-							err1 := json.Unmarshal([]byte(data), &attrs)
-							err2 := json.Unmarshal([]byte(existingAnn), &existingAttrs)
-							if err1 == nil && err2 == nil {
-								for k, v := range attrs {
-									existingAttrs[k] = v
-								}
-								newAnn, err := json.Marshal(existingAttrs)
-								if err == nil {
-									ann[PVAnnotation] = string(newAnn)
-								}
-							}
-						}
-						glog.V(3).Infof("updating with new annotation %+v", ann)
-						pv.ObjectMeta.SetAnnotations(ann)
-					}
-					_, err := c.clientset.CoreV1().PersistentVolumes().Update(pv)
-					if err != nil {
-						glog.Warningf("failed to update pv :%v", err)
-					}
-				}
-
+				c.updatePVAnnotation(pvName, data)
 				c.updatePodPVCMap(ns, name, "", false /* toAdd */)
 			}
 		}
@@ -265,15 +267,10 @@ func (c *Controller) getPodPVCMap(pvcNS, pvcName string) string {
 	return ""
 }
 
-func (c *Controller) GetAttributes(app string) string {
+func (c *Controller) getAttributes(app string) string {
 	for _, conf := range *c.config {
 		if conf.Label == app {
-			str, err := json.Marshal(conf.Attributes)
-			if err != nil {
-				glog.Warningf("failed to marshal %+v", conf.Attributes)
-				return ""
-			}
-			return string(str)
+			return conf.Attributes
 		}
 	}
 	return ""
