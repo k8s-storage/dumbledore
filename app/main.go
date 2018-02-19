@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	defaultPVAnnotation       = "volume.kubernetes.io/pv"
+	defaultPVAnnotation       = "csi.volume.kubernetes.io/volume-attributes"
 	defaultInitializerName    = "pv.initializer.kubernetes.io"
 	defaultConfigmapName      = "pv-initializer"
 	defaultConfigMapNamespace = "default"
